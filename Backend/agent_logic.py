@@ -1,25 +1,33 @@
-import pandas as pd, numpy as np, json, joblib, xgboost as xgb, shap, sqlite3, os
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.tools import tool
-import chromadb, json, logging, sys
+import pandas as pd
+import numpy as np
+import json
+import joblib
+import xgboost as xgb
+import shap
+import sqlite3
+import os
+import logging
+from faker import Faker
+import kagglehub
+from dotenv import load_dotenv
+
 from transformers import logging as transformers_logging
 transformers_logging.set_verbosity_error()
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+
+try:
+    import chromadb
+    from langchain_chroma import Chroma
+    HAS_CHROMA = True
+except (ImportError, Exception) as e:
+    print(f"Warning: ChromaDB or related modules failed to load. Vector features will be disabled. Error: {e}")
+    HAS_CHROMA = False
+    Chroma = None
+
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-import sqlite3, kagglehub
-from faker import Faker
-from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.tools import tool 
-from langchain.agents import create_agent
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-import os
-from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt import create_react_agent
 
@@ -32,11 +40,14 @@ class Fraud_Agent():
         self.model.load_model('XGBoostModel.json')
     
     # Phase 1: Preprocessing
-    def preprocess_transaction(transaction_row, preprocessor=self.preprocessor):
+    def preprocess_transaction(self, transaction_row, preprocessor=None):
         """
         Helper function to preprocess a single transaction row.
         Returns processed DataFrame.
         """
+        if preprocessor is None:
+            preprocessor = self.preprocessor
+
         # Convert to DataFrame if it's a dict or Series
         if not isinstance(transaction_row, pd.DataFrame):
             df_input = pd.DataFrame([transaction_row])
@@ -44,7 +55,7 @@ class Fraud_Agent():
             df_input = transaction_row.copy()
         
         # 1. Drop irrelevant columns
-        cols_to_drop = ['month', 'device_fraud_count', 'fraud_bool']
+        cols_to_drop = ['month', 'device_fraud_count', 'fraud_bool', 'user_id']
         df_input = df_input.drop(columns=[c for c in cols_to_drop if c in df_input.columns], errors='ignore')
     
         # 2. Convert types
@@ -65,6 +76,10 @@ class Fraud_Agent():
         if preprocessor:
             try:
                 X_transformed = preprocessor.transform(df_input)
+                # If preprocessor returns a sparse matrix or numpy array, convert to DataFrame
+                if not isinstance(X_transformed, pd.DataFrame):
+                    feature_names = preprocessor.get_feature_names_out() if hasattr(preprocessor, 'get_feature_names_out') else None
+                    X_transformed = pd.DataFrame(X_transformed, columns=feature_names)
                 return X_transformed
             except Exception as e:
                 print(f"Preprocessing error: {e}")
@@ -73,32 +88,21 @@ class Fraud_Agent():
             return df_input
 
     # Phase 1: Prediction
-    def predict(transaction_row, preprocessor, model_params_path='XGBoostModelParameters.json', model_path='XGBoostModel.json'):
+    def predict(self, transaction_row, preprocessor=None, model=None):
         """
         Takes a single transaction row, preprocesses it, and returns the fraud probability.
         """
-        # Load parameters
-        try:
-            with open(model_params_path, 'r') as file:
-                loaded_params = json.load(file)
-        except FileNotFoundError:
-            print(f"Error: {model_params_path} not found.")
-            return None
+        if preprocessor is None:
+            preprocessor = self.preprocessor
+        if model is None:
+            model = self.model
 
-        X_transformed = preprocess_transaction(transaction_row, preprocessor)
+        X_transformed = self.preprocess_transaction(transaction_row, preprocessor)
         if X_transformed is None:
             return None
         
         X_numpy = X_transformed.to_numpy()
 
-        # Load Model (Note: This assumes model file exists)
-        try:
-            model = xgb.XGBClassifier(**loaded_params)
-            model.load_model(model_path)
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            return None
-        
         # Inference
         try:
             probability = model.predict_proba(X_numpy)[0, 1]
@@ -108,13 +112,18 @@ class Fraud_Agent():
             return None
     
     # Phase 1: Explanation
-    def get_shap_explanation(transaction_data, model = self.model, preprocessor = self.preprocessor):
+    def get_shap_explanation(self, transaction_data, model=None, preprocessor=None):
         """
         Generates a SHAP explanation for a single transaction.
         Returns a dictionary with fraud probability and top 3 contributing features.
         """
+        if model is None:
+            model = self.model
+        if preprocessor is None:
+            preprocessor = self.preprocessor
+
         # Preprocess
-        X_transformed = preprocess_transaction(transaction_data, preprocessor)
+        X_transformed = self.preprocess_transaction(transaction_data, preprocessor)
         if X_transformed is None:
             return {"error": "Preprocessing failed"}
         
@@ -126,25 +135,16 @@ class Fraud_Agent():
         explainer = shap.TreeExplainer(model)
         shap_values = explainer(X_df)
         
-        # Get values for the first (and only) row
-        # shap_values.values shape is (1, n_features)
-        # Binary classification: some shap versions output values for both classes, some just one.
-        # For XGBClassifier binary, it usually outputs log-odds for class 1.
-        
         row_values = shap_values.values[0]
-        # base_value = shap_values.base_values[0] # Not strictly needed for top 3
         data_values = X_df.iloc[0]
         
         # Calculate probability
         prob = model.predict_proba(X_df)[0, 1]
         
         # Identify top 3 features pushing score HIGHER (positive contribution to fraud class)
-        # We want features that increase the probability of fraud.
-        
-        # Create list of (feature_name, shap_value, feature_value)
         contributions = []
         
-        # Handle multi-class output shape if SHAP returns (1, n_features, 2)
+        # Handle multi-class output shape if SHAP returns (n_rows, n_features, 2)
         if len(row_values.shape) > 1:
             # Assuming class 1 is index 1
             row_values = row_values[:, 1]
@@ -184,25 +184,24 @@ class Fraud_Agent():
         connection = sqlite3.connect("Fraud_Agent.db")
         # Download latest version
         path = kagglehub.dataset_download("sgpjesus/bank-account-fraud-dataset-neurips-2022")
-        # ensure we point to a .csv file (dataset_download may return a path without extension)
-        csv_path = str(path) + "/Base.csv"
+        # ensure we point to a .csv file
+        csv_path = os.path.join(path, "Base.csv")
 
         # read the CSV into a DataFrame and setup the final test data
         df_OG = pd.read_csv(csv_path)
         mask = df_OG["month"] == 7
-        full_test_data = df_OG[mask].sample(frac=0.5).reset_index(drop=True).drop('month',axis=1) 
-        df = full_test_data
+        full_test_data = df_OG[mask].sample(frac=0.5, random_state=42).reset_index(drop=True)
+        df = full_test_data.copy()
 
-        # Add 
+        # Add Fake User IDs
         fake = Faker()
-        num_users = len(df) // 8
+        num_users = 100 # Let's say we have 100 unique users
         user_ids = [f"USER_{i:04d}" for i in range(num_users)]
-
-        df['user_id'] = (user_ids * 9)[:len(df)]
+        df['user_id'] = np.random.choice(user_ids, size=len(df))
 
         # Setup a Table in SQL
         table_name = "transaction_history"
-        full_test_data.to_sql(table_name, connection, if_exists='replace', index=False)
+        df.to_sql(table_name, connection, if_exists='replace', index=False)
 
         # Verify the data was written by reading it back into a new DataFrame
         query = f"SELECT * FROM {table_name}"
@@ -212,14 +211,16 @@ class Fraud_Agent():
         connection.close()
         return result_df
 
-    def ingest_pdf():
+    def ingest_pdf(self, pdf_path="Fraud_Detection_Policy.pdf"):
+        if not HAS_CHROMA:
+            return "ChromaDB not available. PDF ingestion skipped."
         # 1. Load PDF
-        if not os.path.exists(PDF_PATH):
-            print(f"Error: {PDF_PATH} not found.")
+        if not os.path.exists(pdf_path):
+            print(f"Error: {pdf_path} not found.")
             return
 
-        print(f"Loading {PDF_PATH}...")
-        loader = PyPDFLoader(PDF_PATH)
+        print(f"Loading {pdf_path}...")
+        loader = PyPDFLoader(pdf_path)
         documents = loader.load()
 
         # 2. Split Text
@@ -235,55 +236,46 @@ class Fraud_Agent():
 
         # 4. Initialize Chroma Client
         print("Initializing ChromaDB client...")
-        chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
+        chroma_client = chromadb.PersistentClient(path=self.CHROMA_PATH)
 
         # 5. Add to Chroma
-        print(f"Adding documents to collection '{CHROMA_COLLECTION_NAME}'...")
+        print(f"Adding documents to collection '{self.CHROMA_COLLECTION_NAME}'...")
         Chroma.from_documents(
             documents=chunked_documents,
             embedding=embedding_function,
-            collection_name=CHROMA_COLLECTION_NAME,
+            collection_name=self.CHROMA_COLLECTION_NAME,
             client=chroma_client,
         )
         
-        print(f"Successfully added {len(chunked_documents)} chunks to ChromaDB at {CHROMA_PATH}")
+        print(f"Successfully added {len(chunked_documents)} chunks to ChromaDB at {self.CHROMA_PATH}")
 
         return "PDF ingested successfully."
 
 
-    # Phase 3: Tools
-    @tool
-    def get_user_transactions(user_id: str):
+    def get_user_transactions(self, user_id: str):
         """
         Randomly select 5 transactions for this user.
-        Use this tool when you need to verify if a user has a history of fraud
-        transactions.
+        Use this tool when you need to verify if a user has a history of fraud transactions.
         """
         db_path = "Fraud_Agent.db"
-
         conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-
+        
         # SELECT any 5 transactions of the user at random
         query = f"SELECT * FROM transaction_history WHERE user_id = '{user_id}' LIMIT 5"
         result_df = pd.read_sql_query(query, conn)
-        print("\nData read from SQLite table:")
-
         conn.close()
 
-        return result_df
+        return result_df.to_string() # LangChain tools usually prefer strings or serializable objects
 
-    @tool
-    def search_bank_policy(query: str) -> str:
+    def search_bank_policy(self, query: str) -> str:
         """
         Searches the official Bank Anti-Fraud Policy documentation. 
         Use this tool when you need to verify if a flagged transaction 
         violates specific banking regulations or internal risk thresholds.
         """
-        # Consistency: Use same embeddings and paths as ingestion
+        if not HAS_CHROMA:
+            return "ChromaDB not available. Unable to search policies."
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-
-        # Initialize Persistent Client
         chroma_client = chromadb.PersistentClient(path=self.CHROMA_PATH)
 
         vector_db = Chroma(
@@ -292,52 +284,59 @@ class Fraud_Agent():
             collection_name=self.CHROMA_COLLECTION_NAME
         )
         
-        # Perform the Similarity Search
-        # k=1 returns only the single most relevant paragraph
         docs = vector_db.similarity_search(query, k=1)
-        
         if not docs:
             return "No relevant policy found for this query."
         
-        # Return the text content of the best match
         return docs[0].page_content
 
     # Phase 4: Agent
     def run_fraud_investigation(self, user_id, transaction_row):
-
         explanation = self.get_shap_explanation(transaction_row, self.model, self.preprocessor)
-        # Configure your API key
+        
+        # Load environment variables
         load_dotenv("GoogleAPI.env") 
-        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+        google_api_key = os.getenv("GOOGLE_API_KEY")
 
-        # Prompt
-        Prompt = """You are a Senior Fraud Investigator.
+        # System Prompt
+        system_prompt = """You are a Senior Fraud Investigator.
         You will be given a transaction and its SHAP explanations.
         Use your tools to check the user's history and bank policy.
         Then, write a 3-sentence memo concluding if it is fraud or not."""
 
-        # 1. Define Tools
-        tools = [self.get_user_transactions, self.search_bank_policy]
+        # 1. Define Tools with self bound
+        @tool
+        def get_user_transactions_tool(user_id: str):
+            """Get transaction history for a user."""
+            return self.get_user_transactions(user_id)
+
+        @tool
+        def search_bank_policy_tool(query: str):
+            """Search bank anti-fraud policies."""
+            return self.search_bank_policy(query)
+
+        tools = [get_user_transactions_tool, search_bank_policy_tool]
 
         # 2. Initialize the model
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-lite",
-            api_key = GOOGLE_API_KEY,
+            model="gemini-1.5-flash-latest", # Updated to a more standard alias
+            api_key=google_api_key,
             temperature=0
         )
 
-        # Initialize the agent
-        agent = create_agent(llm, tools, system_prompt= Prompt)
+        # 3. Initialize the agent (using langgraph prebuilt)
+        agent = create_react_agent(llm, tools, prompt=system_prompt)
 
-
-        # 4. Run the agent with dynamic query from SHAP
-        reasons_str = "\n".join([f"- {r}" for r in explanation['top_reasons']])
+        # 4. Run the agent
+        reasons_str = "\n".join([f"- {r}" for r in explanation.get('top_reasons', [])])
         query = f"""
         Investigate transaction for {user_id}.
-        Model Fraud Probability: {explanation['score']:.2f}
+        Model Fraud Probability: {explanation.get('score', 0):.2f}
         Top SHAP Contributing Factors:
         {reasons_str}
 
         Please check the user's transaction history and cross-reference with bank policy to generate a final memo.
         """
-        return agent.invoke({"messages": [("user", query)]})
+        
+        result = agent.invoke({"messages": [("user", query)]})
+        return result["messages"][-1].content
