@@ -14,6 +14,14 @@ from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.tools import tool 
+from langchain.agents import create_agent
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+import os
+from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.prebuilt import create_react_agent
 
 class Fraud_Agent():
     def __init__(self):
@@ -100,7 +108,7 @@ class Fraud_Agent():
             return None
     
     # Phase 1: Explanation
-    def get_shap_explanation(transaction_data, model, preprocessor):
+    def get_shap_explanation(transaction_data, model = self.model, preprocessor = self.preprocessor):
         """
         Generates a SHAP explanation for a single transaction.
         Returns a dictionary with fraud probability and top 3 contributing features.
@@ -294,15 +302,42 @@ class Fraud_Agent():
         # Return the text content of the best match
         return docs[0].page_content
 
-    # Test the tool manually
-    try:
-        # result = search_bank_policy.invoke("What is the limit for overseas wire transfers?")
-        result = search_bank_policy.invoke("housing status")
-        print(f"Policy Found: {result}")
-    except Exception as e:
-        print(f"Error during search: {e}")
-
     # Phase 4: Agent
-    def run_fraud_investigation(self, transaction_data):
-        
-        pass
+    def run_fraud_investigation(self, user_id, transaction_row):
+
+        explanation = self.get_shap_explanation(transaction_row, self.model, self.preprocessor)
+        # Configure your API key
+        load_dotenv("GoogleAPI.env") 
+        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+        # Prompt
+        Prompt = """You are a Senior Fraud Investigator.
+        You will be given a transaction and its SHAP explanations.
+        Use your tools to check the user's history and bank policy.
+        Then, write a 3-sentence memo concluding if it is fraud or not."""
+
+        # 1. Define Tools
+        tools = [self.get_user_transactions, self.search_bank_policy]
+
+        # 2. Initialize the model
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash-lite",
+            api_key = GOOGLE_API_KEY,
+            temperature=0
+        )
+
+        # Initialize the agent
+        agent = create_agent(llm, tools, system_prompt= Prompt)
+
+
+        # 4. Run the agent with dynamic query from SHAP
+        reasons_str = "\n".join([f"- {r}" for r in explanation['top_reasons']])
+        query = f"""
+        Investigate transaction for {user_id}.
+        Model Fraud Probability: {explanation['score']:.2f}
+        Top SHAP Contributing Factors:
+        {reasons_str}
+
+        Please check the user's transaction history and cross-reference with bank policy to generate a final memo.
+        """
+        return agent.invoke({"messages": [("user", query)]})
