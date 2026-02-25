@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import os
 
 st.set_page_config(page_title="Fraud Investigator Portal", layout="wide")
 
@@ -12,8 +13,9 @@ tx_id = st.text_input("Enter Transaction ID to scan:", value="TXN_00000000")
 if st.button("Start AI Investigation"):
     with st.spinner("Agent is analyzing history and policies..."):
         # 2. Call the FastAPI Backend
+        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
         try:
-            response = requests.post("http://localhost:8000/investigate", json={"tx_id": tx_id})
+            response = requests.post(f"{backend_url}/investigate", json={"tx_id": tx_id})
             
             if response.status_code == 200:
                 data = response.json()
