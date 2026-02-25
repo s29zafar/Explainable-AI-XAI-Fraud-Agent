@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from Backend.agent_logic import Fraud_Agent
+from agent_logic import Fraud_Agent
 import logging
 
 # Configure logging

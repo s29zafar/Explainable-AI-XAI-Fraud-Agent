@@ -309,8 +309,11 @@ class Fraud_Agent():
     def run_fraud_investigation(self, user_id, transaction_row):
         explanation = self.get_shap_explanation(transaction_row, self.model, self.preprocessor)
         
-        # Load environment variables
-        load_dotenv("Backend/GoogleAPI.env") 
+        # Load environment variables (try multiple paths for robustness)
+        for env_path in ["GoogleAPI.env", "Backend/GoogleAPI.env", ".env"]:
+            if os.path.exists(env_path):
+                load_dotenv(env_path)
+        
         google_api_key = os.getenv("GOOGLE_API_KEY")
 
         # System Prompt
