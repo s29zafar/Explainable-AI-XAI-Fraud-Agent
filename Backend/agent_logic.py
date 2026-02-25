@@ -193,11 +193,12 @@ class Fraud_Agent():
         full_test_data = df_OG[mask].sample(frac=0.5, random_state=42).reset_index(drop=True)
         df = full_test_data.copy()
 
-        # Add Fake User IDs
+        # Add Fake User IDs and Transaction IDs
         fake = Faker()
         num_users = 100 # Let's say we have 100 unique users
         user_ids = [f"USER_{i:04d}" for i in range(num_users)]
         df['user_id'] = np.random.choice(user_ids, size=len(df))
+        df['tx_id'] = [f"TXN_{i:08d}" for i in range(len(df))]
 
         # Setup a Table in SQL
         table_name = "transaction_history"
@@ -251,6 +252,20 @@ class Fraud_Agent():
 
         return "PDF ingested successfully."
 
+    def get_transaction_by_id(self, tx_id: str):
+        """
+        Fetch a single transaction by its ID from the database.
+        """
+        db_path = "Fraud_Agent.db"
+        conn = sqlite3.connect(db_path)
+        query = f"SELECT * FROM transaction_history WHERE tx_id = '{tx_id}'"
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        
+        if df.empty:
+            return None
+        return df.iloc[0]
+
 
     def get_user_transactions(self, user_id: str):
         """
@@ -295,7 +310,7 @@ class Fraud_Agent():
         explanation = self.get_shap_explanation(transaction_row, self.model, self.preprocessor)
         
         # Load environment variables
-        load_dotenv("GoogleAPI.env") 
+        load_dotenv("Backend/GoogleAPI.env") 
         google_api_key = os.getenv("GOOGLE_API_KEY")
 
         # System Prompt
@@ -319,7 +334,7 @@ class Fraud_Agent():
 
         # 2. Initialize the model
         llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash-latest", # Updated to a more standard alias
+            model="gemini-2.5-flash-lite", 
             api_key=google_api_key,
             temperature=0
         )
