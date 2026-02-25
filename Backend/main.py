@@ -38,10 +38,15 @@ async def investigate(item: TransactionRequest):
     try:
         # 3. Call the LangGraph agent for investigation
         result = fraud_agent.run_fraud_investigation(user_id, transaction)
+        
+        # Return the rich dictionary directly
         return {
             "tx_id": item.tx_id,
             "user_id": user_id,
-            "memo": result
+            "probability": result["probability"],
+            "shap_values": result["shap_values"],
+            "agent_memo": result["agent_memo"],
+            "policy_reference": result["policy_reference"]
         }
     except Exception as e:
         logger.error(f"Agent investigation failed: {str(e)}")

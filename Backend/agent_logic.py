@@ -354,4 +354,29 @@ class Fraud_Agent():
         """
         
         result = agent.invoke({"messages": [("user", query)]})
-        return result["messages"][-1].content
+        
+        # 5. Extract additional info for frontend
+        agent_memo = result["messages"][-1].content
+        
+        # Try to find if the agent called search_bank_policy tool to get policy reference
+        policy_reference = "No specific policy citations found."
+        for msg in reversed(result["messages"]):
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if tc['name'] == 'search_bank_policy_tool':
+                        # The next message in the list should be the ToolMessage with the result
+                        msg_idx = result["messages"].index(msg)
+                        if msg_idx + 1 < len(result["messages"]):
+                            policy_reference = result["messages"][msg_idx + 1].content
+                        break
+        
+        # Prepare SHAP values for chart (top 5 reasons)
+        high_level_shap = {r.split(' = ')[0]: float(r.split(' = ')[1]) if ' = ' in r and r.split(' = ')[1].replace('.','').isdigit() else 1.0 
+                          for r in explanation.get('top_reasons', [])}
+
+        return {
+            "probability": explanation.get('score', 0),
+            "shap_values": high_level_shap,
+            "agent_memo": agent_memo,
+            "policy_reference": policy_reference
+        }
