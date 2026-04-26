@@ -3,21 +3,18 @@ import os
 
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from openinference.instrumentation.langchain import LangChainInstrumentor
-from prometheus_client import make_asgi_app
 
 # OTel Configuration
 resource = Resource.create({"service.name": "fraud-agent-backend"})
 tracer_provider = TracerProvider(resource=resource)
-# Check if OTLP endpoint is provided
-if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
-    otlp_exporter = OTLPSpanExporter()
-    span_processor = BatchSpanProcessor(otlp_exporter)
-    tracer_provider.add_span_processor(span_processor)
+# Export to Console instead of Jaeger
+console_exporter = ConsoleSpanExporter()
+span_processor = BatchSpanProcessor(console_exporter)
+tracer_provider.add_span_processor(span_processor)
 
 trace.set_tracer_provider(tracer_provider)
 
@@ -33,10 +30,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Fraud Agent API")
-
-# Expose Prometheus metrics
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
 
 # Instrument FastAPI
 FastAPIInstrumentor.instrument_app(app)

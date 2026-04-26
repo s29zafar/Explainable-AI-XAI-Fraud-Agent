@@ -25,4 +25,4 @@ opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-sqlite3
 opentelemetry-exporter-otlp
 openinference-instrumentation-langchain
-prometheus-client
+sentence-transformers
