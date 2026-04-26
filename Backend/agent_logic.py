@@ -10,6 +10,19 @@ import logging
 from faker import Faker
 import kagglehub
 from dotenv import load_dotenv
+# Open Telemetry
+from opentelemetry import trace
+from prometheus_client import Counter, Histogram
+
+tracer = trace.get_tracer(__name__)
+
+# Prometheus Metrics
+fraud_investigations_total = Counter(
+    "fraud_investigations_total", "Total number of fraud investigations"
+)
+fraud_probability_histogram = Histogram(
+    "fraud_probability_score", "Distribution of fraud probability scores"
+)
 
 from transformers import logging as transformers_logging
 transformers_logging.set_verbosity_error()
@@ -88,6 +101,7 @@ class Fraud_Agent():
             return df_input
 
     # Phase 1: Prediction
+    @tracer.start_as_current_span("predict_fraud")
     def predict(self, transaction_row, preprocessor=None, model=None):
         """
         Takes a single transaction row, preprocesses it, and returns the fraud probability.
@@ -112,6 +126,7 @@ class Fraud_Agent():
             return None
     
     # Phase 1: Explanation
+    @tracer.start_as_current_span("get_shap_explanation")
     def get_shap_explanation(self, transaction_data, model=None, preprocessor=None):
         """
         Generates a SHAP explanation for a single transaction.
@@ -140,6 +155,7 @@ class Fraud_Agent():
         
         # Calculate probability
         prob = model.predict_proba(X_df)[0, 1]
+        fraud_probability_histogram.observe(prob)
         
         # Identify top 3 features pushing score HIGHER (positive contribution to fraud class)
         contributions = []
@@ -306,7 +322,9 @@ class Fraud_Agent():
         return docs[0].page_content
 
     # Phase 4: Agent
+    @tracer.start_as_current_span("run_fraud_investigation")
     def run_fraud_investigation(self, user_id, transaction_row):
+        fraud_investigations_total.inc()
         explanation = self.get_shap_explanation(transaction_row, self.model, self.preprocessor)
         
         # Load environment variables (try multiple paths for robustness)
